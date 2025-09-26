@@ -1,6 +1,6 @@
 from manim import *
 from manim_slides import Slide, ThreeDSlide
-from configs import *
+from .configs import *
 
 from abc import ABC, abstractmethod
 from typing import Protocol, runtime_checkable
