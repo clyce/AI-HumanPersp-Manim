@@ -49,7 +49,7 @@ Bilibili: [@Clyce](https://space.bilibili.com/597237854)
 * 看到 “白日依山尽”，你会自然想到“黄河入海流”
 * 看到一个象鼻的特写，你会自行脑补出“大象”的全身
 * 人类的记忆，其根本的工作方式比起 “搜寻” ，更准确的是 “唤起”。你通过记忆的一部分，或者和记忆相关的某种线索，自然而然地补充出 “记忆” 的全貌。
-* 这样的系统被称为 Content Access Memory (CAM)
+* 这样的系统被称为 Content Addressable Memory (CAM) 或 Associative Memory (AM)
 
 ---
 

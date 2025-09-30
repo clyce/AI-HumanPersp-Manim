@@ -14,7 +14,7 @@ class CAMSlideComponent(TitleSlideComponent):
         【画分割线】
         回忆的过程，相比于”搜寻“【播放动画 C】，更准确的是”唤起“【播放动画 D】
         你通过记忆的一部分，或者和记忆相关的某种线索，自然而然地补充出 “记忆” 的全貌【播放动画 E】
-        这样的系统，我们称之为 Content Access Memory (CAM)【写下 CAM 字样】
+        这样的系统，我们称之为 Content Addressable Memory (CAM) 或 Associative Memory (AM)【写下 CAM 字样】
 
         ====
 
@@ -25,7 +25,7 @@ class CAMSlideComponent(TitleSlideComponent):
         黄河入海流 |  图标)
         ---------分割线---------
         动画 C       动画 D
-        Content Access Memory (CAM)
+        Content Addressable Memory (CAM)
 
         ====
 

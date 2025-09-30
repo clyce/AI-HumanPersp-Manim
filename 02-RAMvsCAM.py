@@ -22,10 +22,10 @@ class RAMvsCAM(SlideWithCover):
         #self.slide_manager.add_component(BUTSlideComponent)
         #self.slide_manager.add_component(CAMSlideComponent)
         #self.slide_manager.add_component(GangingUpSlideComponent)
-        #self.slide_manager.add_component(PreSetSlideComponent)
+        self.slide_manager.add_component(PreSetSlideComponent)
         #self.slide_manager.add_component(SelfOrgSlideComponent)
-        #self.slide_manager.add_component(MessedUpSlideComponent)
-        self.slide_manager.add_component(SubConsSlideComponent)
+        self.slide_manager.add_component(MessedUpSlideComponent)
+        #self.slide_manager.add_component(SubConsSlideComponent)
         #self.slide_manager.add_component(ThanksSlideComponent)
 
         self.slide_manager.simple_execute_all()

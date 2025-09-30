@@ -1,5 +1,6 @@
 from manim import *
 from manim_slides import Slide, ThreeDSlide
+import traceback
 from .configs import *
 
 from abc import ABC, abstractmethod
@@ -70,6 +71,8 @@ class SlideComponent(ABC):
             self.render()
 
         except Exception as e:
+            # print stack trace
+            print(traceback.format_exc())
             self.on_error(e)
             raise
         finally:

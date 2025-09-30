@@ -1,8 +1,10 @@
 import numpy as np
+import traceback
 from manim import *
 from src.SlideFrames import *
 from src.configs import *
 from src.hopfield_tools import HopfieldNetworkTools
+from SlideComponents.S02_RAMvsCAM.shared import get_patterns_for_compare, get_pattern_names, get_cue_indices, calculate_cued_accuracy
 
 class MessedUpSlideComponent(ColumnLayoutSlideComponent):
     def __init__(self, context):
@@ -55,22 +57,11 @@ class MessedUpSlideComponent(ColumnLayoutSlideComponent):
         self.hopfield.create_face_circle(left_pos, show_animation=True)
         self.context.next_slide()
 
-        # 定义八个不同的牌组（6位二进制模式）
-        patterns = [
-            [1, 0, 1, 0, 1, 1],  # 牌组1
-            [0, 1, 1, 0, 0, 1],  # 牌组2
-            [1, 1, 0, 1, 0, 0],  # 牌组3
-            [0, 0, 1, 1, 1, 0],  # 牌组4
-            [1, 0, 0, 1, 1, 1],  # 牌组5
-            [0, 1, 0, 0, 1, 1],  # 牌组6
-            [1, 1, 1, 0, 0, 0],  # 牌组7
-            [0, 0, 0, 1, 1, 0],  # 牌组8
-            [1, 1, 0, 0, 1, 1],  # 牌组9
-        ]
+        # 使用共享配置获取牌组和名称
+        patterns = get_patterns_for_compare()
+        pattern_names = get_pattern_names(len(patterns))
 
-        pattern_names = [f"牌组 {i+1}" for i in range(len(patterns))]
-
-        # 动画 B: 在右侧生成八个牌组并训练
+        # 动画 B: 在右侧生成 12 个牌组并训练
         # 右侧分为两列：真实模式列和回忆结果列
         true_patterns_pos = [right_pos[0] - 1.2, right_pos[1] + 2.5, 0]
         recall_results_pos = [right_pos[0] + 1.2, right_pos[1] + 2.5, 0]
@@ -87,12 +78,6 @@ class MessedUpSlideComponent(ColumnLayoutSlideComponent):
         # 显示所有牌组
         self._display_all_patterns(patterns, pattern_names, true_patterns_pos)
         self.context.next_slide()
-
-        # 训练网络
-        self.context.play(
-            Write(Text("正在展开辩论...", font_size=18, color="#FFD700").move_to(left_pos + DOWN * 2.5)),
-            run_time=0.3
-        )
 
         self.hopfield.train_hopfield_network(patterns, show_animation=True)
         self.context.next_slide()
@@ -135,15 +120,8 @@ class MessedUpSlideComponent(ColumnLayoutSlideComponent):
 
     def _test_pattern_recall(self, original_pattern, pattern_idx, true_pos, recall_pos):
         """测试单个模式的回忆能力"""
-        # 选择部分位置作为提示（前3个牌组取3位，后5个取2位）
-        np.random.seed(pattern_idx)  # 为了结果可重复
-
-        if pattern_idx < 3:  # 前3个牌组取3位提示
-            cue_size = 3
-        else:  # 后5个牌组取2位提示
-            cue_size = 2
-
-        cue_indices = np.random.choice(6, size=cue_size, replace=False)
+        # 使用共享配置获取提示位组合（统一使用3位掩码）
+        cue_indices = get_cue_indices(pattern_idx)
 
         # 创建提示模式
         cue_pattern = [None] * 6
@@ -186,19 +164,30 @@ class MessedUpSlideComponent(ColumnLayoutSlideComponent):
         #self.context.wait(0.5)
 
         # 进行网络回忆（让工具类处理所有脸部动画）
-        recalled_pattern = self.hopfield.network_recall(cue_pattern, show_animation=False)
+        recalled_pattern = self.hopfield.network_recall(cue_pattern, show_animation=True)
+
+        # 安全检查：确保recalled_pattern是有效的
+        if recalled_pattern is None:
+            print(f"Warning: network_recall returned None for pattern {pattern_idx}")
+            recalled_pattern = [0] * 6  # 默认模式
+        elif len(recalled_pattern) != 6:
+            print(f"Warning: recalled_pattern length {len(recalled_pattern)} != 6 for pattern {pattern_idx}")
+            # 截断或填充到正确长度
+            recalled_pattern = recalled_pattern[:6] + [0] * max(0, 6 - len(recalled_pattern))
 
         # 显示回忆结果
         recall_y_pos = [recall_pos[0], recall_pos[1] - pattern_idx * 0.6, 0]
 
         for i, value in enumerate(recalled_pattern):
+            if i >= 6:  # 额外的安全检查
+                break
             dot = self.hopfield.create_card(value)
             pos = [recall_y_pos[0] + (i - 2.5) * dot_spacing, recall_y_pos[1], 0]
             dot.move_to(pos)
             self.context.play(FadeIn(dot), run_time=0.1)
 
         # 计算准确率（只计算未被提示的部分）
-        accuracy = self._calculate_cued_accuracy(original_pattern, recalled_pattern, cue_indices)
+        accuracy = calculate_cued_accuracy(original_pattern, recalled_pattern, cue_indices)
 
         # 显示准确率
         acc_text = Text(
@@ -212,20 +201,7 @@ class MessedUpSlideComponent(ColumnLayoutSlideComponent):
         self.context.wait(0.3)
         return accuracy
 
-    def _calculate_cued_accuracy(self, original_pattern, recalled_pattern, cue_indices):
-        """计算仅针对未被提示（锁定）部分的准确率"""
-        if len(original_pattern) != len(recalled_pattern):
-            return 0.0
-
-        # 获取未被提示的位置
-        uncued_indices = [i for i in range(len(original_pattern)) if i not in cue_indices]
-
-        if len(uncued_indices) == 0:
-            return 1.0  # 如果所有位置都被提示了，认为准确率为100%
-
-        # 计算未被提示位置的准确率
-        correct = sum(1 for i in uncued_indices if original_pattern[i] == recalled_pattern[i])
-        return correct / len(uncued_indices)
+        # _calculate_cued_accuracy 方法已移至 Shared.py，这里不再需要
 
     def _show_final_accuracy(self, avg_accuracy):
         """显示最终平均准确率"""
