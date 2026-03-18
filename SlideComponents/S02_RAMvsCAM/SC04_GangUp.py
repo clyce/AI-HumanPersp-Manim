@@ -1,6 +1,7 @@
 from manim import *
 from src.SlideFrames import *
 from src.configs import *
+from src.mobjects.faces import HumanHappyFace, HumanSadFace, HumanNeutralFace
 
 class GangingUpSlideComponent(TitleSlideComponent):
     def __init__(self, context):
@@ -64,54 +65,39 @@ class GangingUpSlideComponent(TitleSlideComponent):
              [face_spacing_x + pair_spacing/2, -face_spacing_y/2, 0]]
         ]
 
-        # 动画 A: 依次画四对脸（共八张）
         self.faces = []
-        for pair_idx, pair_positions in enumerate(positions):
+        all_face_anims = []
+        for pair_positions in positions:
             pair_faces = []
             for face_pos in pair_positions:
-                # 创建中性表情的脸
                 face = HumanNeutralFace(size=face_size)
                 face.move_to(face_pos)
                 pair_faces.append(face)
-
+                all_face_anims.append(FadeIn(face))
             self.faces.append(pair_faces)
-            # 依次显示每对脸
-            self.context.play(*[FadeIn(face) for face in pair_faces], run_time=0.15)
 
-        self.context.wait(0.3)
+        self.context.play(*all_face_anims, run_time=0.5)
         self.context.next_slide()
 
-        # 动画 B: 在每一对脸之间画一条白线，上面显示数字 0.0
         self.connection_lines = []
         self.support_numbers = []
+        conn_anims = []
 
-        for pair_idx, pair_faces in enumerate(self.faces):
+        for pair_faces in self.faces:
             left_face, right_face = pair_faces
-
-            # 创建连接线
             line = Line(
-                left_face.get_center() + RIGHT * face_size/2,
-                right_face.get_center() + LEFT * face_size/2,
-                color=WHITE,
-                stroke_width=3
+                left_face.get_center() + RIGHT * face_size / 2,
+                right_face.get_center() + LEFT * face_size / 2,
+                color=WHITE, stroke_width=3
             )
-
-            # 创建数字标签
-            number = DecimalNumber(
-                0.0,
-                num_decimal_places=1,
-                font_size=20,
-                color=WHITE
-            )
+            number = DecimalNumber(0.0, num_decimal_places=1, font_size=20, color=WHITE)
             number.move_to(line.get_center() + UP * 0.3)
 
             self.connection_lines.append(line)
             self.support_numbers.append(number)
+            conn_anims.extend([Create(line), FadeIn(number)])
 
-            # 显示连接线和数字
-            self.context.play(Create(line), FadeIn(number), run_time=0.15)
-
-        self.context.wait(0.3)
+        self.context.play(*conn_anims, run_time=0.5)
         self.context.next_slide()
 
         # 动画 C: 左上方的一对脸 - 正支持度和同步表情

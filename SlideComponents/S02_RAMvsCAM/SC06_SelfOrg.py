@@ -103,10 +103,26 @@ class SelfOrgSlideComponent(ColumnLayoutSlideComponent):
 
         self.context.wait(0.8)
 
-        # 最后的高亮文本
-        highlight_text = Text("'编码'的魅力！", font_size=20, color="#FF6B9D", weight=BOLD)
+        highlight_text = Text("「编码」的魅力！", font_size=20, color="#FF6B9D", weight=BOLD)
         highlight_text.move_to(right_pos + DOWN * 1.5)
         self.context.play(Write(highlight_text), run_time=1.0)
 
-        self.context.wait(2.0)
+        self.context.wait(0.5)
+        self.context.next_slide()
+
+        # Hopfield 命名 + BM 铺垫
+        hopfield_name = Text(
+            "这就是 Hopfield Network 的核心思想",
+            font=font_heading, font_size=22, color="#87CEEB"
+        )
+        hopfield_name.move_to(ORIGIN + DOWN * 2.2)
+        self.context.play(Write(hopfield_name), run_time=0.8)
+        self.context.next_slide()
+
+        bridge = Text(
+            "它是一种强大的记忆体——但「记住」和「理解」是同一回事吗？",
+            font=font_main_text, font_size=20, color="#FFD700"
+        )
+        bridge.move_to(ORIGIN + DOWN * 2.8)
+        self.context.play(Write(bridge), run_time=0.8)
         self.context.next_slide()

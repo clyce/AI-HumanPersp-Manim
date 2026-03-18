@@ -634,14 +634,9 @@ class SlideManager:
             raise IndexError(f"Component index {index} out of range")
 
     def execute_all(self):
-        """按顺序执行所有组件"""
+        """按顺序执行所有组件，任一组件出错时立即终止渲染。"""
         for i, component in enumerate(self.components):
-            try:
-                component.execute()
-            except Exception as e:
-                print(f"Error executing component {i}: {e}")
-                # 可以选择继续执行下一个组件或停止
-                continue
+            component.execute()
 
     def simple_execute_all(self):
         """
@@ -806,8 +801,7 @@ class ThanksSlideComponent(SlideComponent):
         )
         encouragement_text.next_to(contact_info, DOWN, buff=0.8)
 
-        # 动画显示
         self.context.play(FadeIn(thanks_text), run_time=1.0)
         self.context.play(FadeIn(contact_info), run_time=1.0)
         self.context.play(FadeIn(encouragement_text), run_time=1.2)
-        self.context.next_slide()
+        self.context.wait(2.0)

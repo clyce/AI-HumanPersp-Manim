@@ -84,20 +84,18 @@ class PreSetSlideComponent(ColumnLayoutSlideComponent):
         group_label.shift(UP * 0.4)
         self.context.play(Write(group_label), run_time=0.5)
 
-        # 创建牌组（使用圆点，减小间距）
         cards = []
-        dot_spacing = 0.25  # 减小间距
+        dot_spacing = 0.25
+        card_anims = []
 
         for i, value in enumerate(pattern):
             dot = self.hopfield.create_card(value)
-            # 水平排列牌组，增加间距
             pos = [base_pos[0] + (i - 2.5) * dot_spacing, base_pos[1], 0]
             dot.move_to(pos)
             cards.append(dot)
+            card_anims.append(FadeIn(dot))
 
-            self.context.play(FadeIn(dot), run_time=0.15)
-
-        self.context.wait(0.3)
+        self.context.play(*card_anims, run_time=0.3)
         self.context.next_slide()
 
         # 分发给脸
@@ -113,28 +111,19 @@ class PreSetSlideComponent(ColumnLayoutSlideComponent):
         base_pos = self.card_area_1 if "1" in group_name else self.card_area_2
         dot_spacing = 0.25  # 使用相同的间距
 
-        dots_to_fade = []  # 收集需要淡出的圆点
+        dots_to_fade = []
+        collect_anims = []
 
-        for i in range(6):  # 使用固定数量
-            # 使用工具类跟踪的表情状态
+        for i in range(6):
             value = self.hopfield.current_emotions[i] if self.hopfield.current_emotions[i] is not None else 0
-
             dot = self.hopfield.create_card(value)
-            dot.move_to(self.hopfield.face_positions[i] + UP * 0.3)
-
-            # 水平排列收回的圆点
             target_pos = [base_pos[0] + (i - 2.5) * dot_spacing, base_pos[1], 0]
-
-            self.context.play(
-                FadeIn(dot),
-                dot.animate.move_to(target_pos),
-                run_time=0.15
-            )
-
+            dot.move_to(target_pos)
             dots_to_fade.append(dot)
+            collect_anims.append(FadeIn(dot))
 
-        self.context.wait(0.3)
-        self.context.play(*[FadeOut(dot) for dot in dots_to_fade], run_time=0.1)
+        self.context.play(*collect_anims, run_time=0.3)
+        self.context.play(*[FadeOut(dot) for dot in dots_to_fade], run_time=0.2)
         self.context.next_slide()
 
     def _animate_partial_cue_and_recall(self):

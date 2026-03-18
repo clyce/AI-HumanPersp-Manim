@@ -11,8 +11,7 @@ import numpy as np
 from manim import *
 from src.mobjects.faces import HumanHappyFace, HumanSadFace, HumanNeutralFace
 
-# 全局随机种子，确保结果可重现
-RANDOM_SEED = 42
+DEFAULT_SEED = 42
 
 class StandardBoltzmannMachine:
     """
@@ -28,7 +27,7 @@ class StandardBoltzmannMachine:
     4. 基于能量的模型
     """
 
-    def __init__(self, context, n_visible=6, n_invisible=30, on_weight_change=None, on_node_value_change=None):
+    def __init__(self, context, n_visible=6, n_invisible=30, on_weight_change=None, on_node_value_change=None, seed=DEFAULT_SEED):
         """
         初始化标准玻尔兹曼机
 
@@ -38,58 +37,47 @@ class StandardBoltzmannMachine:
             n_invisible: 隐藏单元数量
             on_weight_change: 权重变化回调函数 (context, i, j) => void
             on_node_value_change: 节点值变化回调函数 (context, i, value) => void
+            seed: 随机种子（仅在初始化时设置一次）
         """
         self.context = context
         self.n_visible = n_visible
         self.n_invisible = n_invisible
         self.n_total = n_visible + n_invisible
 
-        # 回调函数
+        # 实例级 RNG，避免污染全局状态且保证可重现
+        self.rng = np.random.default_rng(seed)
+
         self.on_weight_change = on_weight_change
         self.on_node_value_change = on_node_value_change
 
-        # 初始化权重矩阵（对称，无自连接）
         self.weights = self._initialize_weights()
 
-        # 初始化单元状态（二进制：0或1）
         self.visible_states = np.zeros(n_visible, dtype=int)
         self.invisible_states = np.zeros(n_invisible, dtype=int)
 
-        # 偏置项
         self.visible_biases = np.zeros(n_visible)
         self.invisible_biases = np.zeros(n_invisible)
 
-        # 学习参数
         self.learning_rate = 0.1
         self.temperature = 1.0
 
-        # 训练统计
+        # 推理时的退火参数
+        self.inference_initial_temp = 2.0
+        self.inference_final_temp = 0.1
+
         self.energy_history = []
 
-        # 固定节点支持（用于推理时保持某些可见单元不变）
-        self.fixed_visible_indices = set()  # 固定的可见单元索引
+        self.fixed_visible_indices = set()
 
     def _initialize_weights(self):
         """
         初始化权重矩阵
 
         使用小随机值初始化，确保对称性且无自连接
-
-        Returns:
-            np.ndarray: 初始化的权重矩阵
         """
-        # 设置随机种子确保可重现性
-        np.random.seed(RANDOM_SEED)
-
-        # 创建对称的随机权重矩阵
-        weights = np.random.normal(0, 0.1, (self.n_total, self.n_total))
-
-        # 确保对称性
+        weights = self.rng.normal(0, 0.1, (self.n_total, self.n_total))
         weights = (weights + weights.T) / 2
-
-        # 去除自连接
         np.fill_diagonal(weights, 0)
-
         return weights
 
     def get_all_states(self):
@@ -173,124 +161,95 @@ class StandardBoltzmannMachine:
 
         return -(weight_energy + bias_energy)
 
-    def compute_activation_probability(self, unit_index, states=None):
+    def compute_activation_probability(self, unit_index, states=None, temperature=None):
         """
         计算单元激活概率
 
-        使用 sigmoid 函数：P(s_i = 1) = σ(∑ w_ij * s_j + b_i)
+        使用 sigmoid 函数：P(s_i = 1) = sigma(net_input / T)
 
         Args:
             unit_index: 要计算的单元索引
             states: 其他单元的状态（可选，默认使用当前状态）
-
-        Returns:
-            float: 激活概率 [0, 1]
+            temperature: 覆盖实例温度（用于退火）
         """
         if states is None:
             states = self.get_all_states()
 
-        # 计算净输入
-        net_input = 0
-        for j in range(self.n_total):
-            if j != unit_index:  # 不包括自身
-                net_input += self.weights[unit_index, j] * states[j]
+        T = temperature if temperature is not None else self.temperature
 
-        # 添加偏置
+        # 向量化计算净输入
+        net_input = np.dot(self.weights[unit_index], states) - self.weights[unit_index, unit_index] * states[unit_index]
+
         if unit_index < self.n_visible:
             net_input += self.visible_biases[unit_index]
         else:
             net_input += self.invisible_biases[unit_index - self.n_visible]
 
-        # 应用温度参数和 sigmoid 函数
-        if self.temperature == 0:
-            # 温度=0时，使用确定性激活（阈值函数）
-            return 1.0 if net_input > 0 else 0.0
+        if T <= 1e-8:
+            return 1.0 if net_input > 0 else (0.5 if net_input == 0 else 0.0)
         else:
-            return 1.0 / (1.0 + np.exp(-net_input / self.temperature))
+            exponent = -net_input / T
+            exponent = np.clip(exponent, -500, 500)
+            return 1.0 / (1.0 + np.exp(exponent))
 
-    def sample_unit(self, unit_index, states=None):
+    def sample_unit(self, unit_index, states=None, temperature=None):
         """
-        对单个单元进行采样
+        对单个单元进行采样（使用实例级 RNG，不重置种子）
 
         Args:
             unit_index: 要采样的单元索引
             states: 其他单元的状态（可选）
-
-        Returns:
-            int: 采样结果 (0 或 1)
+            temperature: 覆盖实例温度（用于退火）
         """
-        prob = self.compute_activation_probability(unit_index, states)
+        prob = self.compute_activation_probability(unit_index, states, temperature)
 
-        # 温度=0时，概率是确定性的（0.0或1.0），无需随机采样
-        if self.temperature == 0:
-            return int(prob)  # prob 应该是 0.0 或 1.0
+        T = temperature if temperature is not None else self.temperature
+        if T <= 1e-8:
+            return 1 if prob > 0.5 else 0
         else:
-            # 为随机采样设置种子（基于单元索引确保一致性）
-            np.random.seed(RANDOM_SEED + unit_index)
-            return 1 if np.random.random() < prob else 0
+            return 1 if self.rng.random() < prob else 0
 
-    def gibbs_sampling_step(self, update_visible=True, update_invisible=True):
+    def gibbs_sampling_step(self, update_visible=True, update_invisible=True, temperature=None):
         """
-        执行一步Gibbs采样
-
-        依次更新每个单元的状态
+        执行一步Gibbs采样，随机更新顺序以避免系统性偏差
 
         Args:
             update_visible: 是否更新可见单元
             update_invisible: 是否更新隐藏单元
+            temperature: 覆盖实例温度（用于退火）
         """
         all_states = self.get_all_states()
 
-        # 更新可见单元（跳过固定的单元）
+        # 构建需要更新的单元索引列表，并随机打乱
+        units_to_update = []
         if update_visible:
-            for i in range(self.n_visible):
-                # 跳过固定的可见单元
-                if i in self.fixed_visible_indices:
-                    continue
-
-                new_state = self.sample_unit(i, all_states)
-                all_states[i] = new_state
-                self.visible_states[i] = new_state
-
-                # 触发可视化回调
-                if self.on_node_value_change:
-                    self.on_node_value_change(self.context, i, new_state)
-
-        # 更新隐藏单元
+            units_to_update.extend([i for i in range(self.n_visible) if i not in self.fixed_visible_indices])
         if update_invisible:
-            for i in range(self.n_invisible):
-                unit_index = i + self.n_visible
-                new_state = self.sample_unit(unit_index, all_states)
-                all_states[unit_index] = new_state
-                self.invisible_states[i] = new_state
+            units_to_update.extend(range(self.n_visible, self.n_total))
 
-                # 触发可视化回调
-                if self.on_node_value_change:
-                    self.on_node_value_change(self.context, unit_index, new_state)
+        self.rng.shuffle(units_to_update)
+
+        for unit_index in units_to_update:
+            new_state = self.sample_unit(unit_index, all_states, temperature)
+            all_states[unit_index] = new_state
+
+            if unit_index < self.n_visible:
+                self.visible_states[unit_index] = new_state
+            else:
+                self.invisible_states[unit_index - self.n_visible] = new_state
+
+            if self.on_node_value_change:
+                self.on_node_value_change(self.context, unit_index, new_state)
 
     def run_gibbs_chain(self, steps=100, update_visible=True, update_invisible=True):
         """
         运行Gibbs采样链
-
-        Args:
-            steps: 采样步数
-            update_visible: 是否更新可见单元
-            update_invisible: 是否更新隐藏单元
-
-        Returns:
-            list: 每步的能量值历史
         """
         energy_history = []
-
         for step in range(steps):
             self.gibbs_sampling_step(update_visible, update_invisible)
             energy = self.compute_energy()
             energy_history.append(energy)
-
-            # 每10步记录一次
-            if step % 10 == 0:
-                print(f"Step {step}, Energy: {energy:.4f}")
-
         return energy_history
 
     def mean_field_inference(self, max_iterations=50, tolerance=1e-4):
@@ -306,10 +265,8 @@ class StandardBoltzmannMachine:
         Returns:
             tuple: (是否收敛, 迭代次数, 最终概率)
         """
-        # 初始化平均场概率（使用确定性初始化）
-        np.random.seed(RANDOM_SEED)
-        visible_probs = np.random.random(self.n_visible)
-        invisible_probs = np.random.random(self.n_invisible)
+        visible_probs = self.rng.random(self.n_visible)
+        invisible_probs = self.rng.random(self.n_invisible)
 
         for iteration in range(max_iterations):
             old_visible_probs = visible_probs.copy()
@@ -365,74 +322,50 @@ class StandardBoltzmannMachine:
 
     def contrastive_divergence_step(self, data_batch, cd_steps=1):
         """
-        对比散度学习步骤
-
-        Args:
-            data_batch: 训练数据批次 (batch_size, n_visible)
-            cd_steps: CD步数（CD-k中的k）
-
-        Returns:
-            float: 平均重构误差
+        对比散度学习步骤（使用实例级 RNG，无种子重置）
         """
         batch_size = len(data_batch)
         total_error = 0
 
-        # 权重梯度累积
         weight_gradients = np.zeros_like(self.weights)
         visible_bias_gradients = np.zeros_like(self.visible_biases)
         invisible_bias_gradients = np.zeros_like(self.invisible_biases)
 
         for data_point in data_batch:
-            # 正相位：设置可见单元为数据
             self.set_visible_states(data_point)
 
-            # 采样隐藏单元
             for i in range(self.n_invisible):
                 unit_idx = i + self.n_visible
                 self.invisible_states[i] = self.sample_unit(unit_idx)
 
-            # 记录正相位统计
             positive_visible = self.visible_states.copy()
             positive_invisible = self.invisible_states.copy()
 
-            # 负相位：运行CD-k步
             for _ in range(cd_steps):
                 self.gibbs_sampling_step(update_visible=True, update_invisible=True)
 
-            # 记录负相位统计
             negative_visible = self.visible_states.copy()
             negative_invisible = self.invisible_states.copy()
 
-            # 计算梯度
-            all_positive = np.concatenate([positive_visible, positive_invisible])
-            all_negative = np.concatenate([negative_visible, negative_invisible])
+            # 向量化梯度计算
+            all_positive = np.concatenate([positive_visible, positive_invisible]).astype(float)
+            all_negative = np.concatenate([negative_visible, negative_invisible]).astype(float)
 
-            # 权重梯度
-            for i in range(self.n_total):
-                for j in range(i + 1, self.n_total):
-                    positive_corr = all_positive[i] * all_positive[j]
-                    negative_corr = all_negative[i] * all_negative[j]
-                    weight_gradients[i, j] += (positive_corr - negative_corr)
-                    weight_gradients[j, i] += (positive_corr - negative_corr)
+            weight_gradients += np.outer(all_positive, all_positive) - np.outer(all_negative, all_negative)
 
-            # 偏置梯度
             visible_bias_gradients += (positive_visible - negative_visible)
             invisible_bias_gradients += (positive_invisible - negative_invisible)
 
-            # 计算重构误差
             reconstruction_error = np.mean((data_point - negative_visible) ** 2)
             total_error += reconstruction_error
 
-        # 更新参数
         self.weights += self.learning_rate * weight_gradients / batch_size
         self.visible_biases += self.learning_rate * visible_bias_gradients / batch_size
         self.invisible_biases += self.learning_rate * invisible_bias_gradients / batch_size
 
-        # 确保权重对称性和无自连接
         self.weights = (self.weights + self.weights.T) / 2
         np.fill_diagonal(self.weights, 0)
 
-        # 触发权重变化回调
         if self.on_weight_change:
             for i in range(self.n_total):
                 for j in range(i + 1, self.n_total):
@@ -442,30 +375,17 @@ class StandardBoltzmannMachine:
 
     def train(self, training_data, epochs=100, batch_size=10, cd_steps=1, verbose=True):
         """
-        训练玻尔兹曼机
-
-        Args:
-            training_data: 训练数据 (n_samples, n_visible)
-            epochs: 训练轮数
-            batch_size: 批次大小
-            cd_steps: 对比散度步数
-            verbose: 是否打印训练进度
-
-        Returns:
-            list: 训练损失历史
+        训练玻尔兹曼机（使用实例级 RNG，无种子重置）
         """
         training_data = np.array(training_data)
         n_samples = len(training_data)
         loss_history = []
 
         for epoch in range(epochs):
-            # 随机打乱数据（使用固定种子确保可重现性）
-            np.random.seed(RANDOM_SEED + epoch)
-            shuffled_indices = np.random.permutation(n_samples)
+            shuffled_indices = self.rng.permutation(n_samples)
             epoch_loss = 0
             n_batches = 0
 
-            # 批次训练
             for start_idx in range(0, n_samples, batch_size):
                 end_idx = min(start_idx + batch_size, n_samples)
                 batch_indices = shuffled_indices[start_idx:end_idx]
@@ -486,34 +406,22 @@ class StandardBoltzmannMachine:
     def train_with_convergence(self, training_data, max_epochs=1000, batch_size=10, cd_steps=1,
                              patience=20, min_improvement=1e-6, verbose=True):
         """
-        基于收敛条件的训练
-
-        Args:
-            training_data: 训练数据 (n_samples, n_visible)
-            max_epochs: 最大训练轮数
-            batch_size: 批次大小
-            cd_steps: 对比散度步数
-            patience: 早停耐心值（连续多少轮无改善停止）
-            min_improvement: 最小改善阈值
-            verbose: 是否打印训练进度
-
-        Returns:
-            dict: 包含损失历史和收敛信息的字典
+        基于收敛条件的训练（使用实例级 RNG，无种子重置）
         """
         training_data = np.array(training_data)
         n_samples = len(training_data)
         loss_history = []
         best_loss = float('inf')
+        best_weights = self.weights.copy()
+        best_vb = self.visible_biases.copy()
+        best_hb = self.invisible_biases.copy()
         epochs_without_improvement = 0
 
         for epoch in range(max_epochs):
-            # 随机打乱数据（使用固定种子确保可重现性）
-            np.random.seed(RANDOM_SEED + epoch)
-            shuffled_indices = np.random.permutation(n_samples)
+            shuffled_indices = self.rng.permutation(n_samples)
             epoch_loss = 0
             n_batches = 0
 
-            # 批次训练
             for start_idx in range(0, n_samples, batch_size):
                 end_idx = min(start_idx + batch_size, n_samples)
                 batch_indices = shuffled_indices[start_idx:end_idx]
@@ -526,20 +434,25 @@ class StandardBoltzmannMachine:
             avg_loss = epoch_loss / n_batches
             loss_history.append(avg_loss)
 
-            # 检查收敛
             if avg_loss < best_loss - min_improvement:
                 best_loss = avg_loss
+                best_weights = self.weights.copy()
+                best_vb = self.visible_biases.copy()
+                best_hb = self.invisible_biases.copy()
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
 
-            if verbose and epoch % 10 == 0:
+            if verbose and epoch % 50 == 0:
                 print(f"Epoch {epoch}, Loss: {avg_loss:.6f}, Best: {best_loss:.6f}")
 
-            # 早停检查
             if epochs_without_improvement >= patience:
                 if verbose:
                     print(f"Early stopping at epoch {epoch}, no improvement for {patience} epochs")
+                # 恢复到最优权重
+                self.weights = best_weights
+                self.visible_biases = best_vb
+                self.invisible_biases = best_hb
                 return {
                     'loss_history': loss_history,
                     'converged': True,
@@ -548,88 +461,76 @@ class StandardBoltzmannMachine:
                     'best_loss': best_loss
                 }
 
-        # 达到最大轮数
+        self.weights = best_weights
+        self.visible_biases = best_vb
+        self.invisible_biases = best_hb
         return {
             'loss_history': loss_history,
             'converged': False,
             'final_epoch': max_epochs - 1,
-            'final_loss': avg_loss,
+            'final_loss': loss_history[-1] if loss_history else 0,
             'best_loss': best_loss
         }
 
     def run_inference_until_convergence(self, max_steps=1000, voting_window=20,
                                       early_stop_threshold=0.6, check_interval=10, verbose=False):
         """
-        运行推理直到收敛（基于多数投票的实用方法）
+        运行推理直到收敛，使用温度退火 + 多数投票
 
-        Args:
-            max_steps: 最大推理步数
-            voting_window: 多数投票窗口大小
-            early_stop_threshold: 早停阈值（某状态占比达到此值时提前停止）
-            check_interval: 检查收敛的间隔
-            verbose: 是否打印过程信息
-
-        Returns:
-            dict: 包含收敛信息的字典
+        高温阶段让网络充分探索，低温阶段使网络收敛到能量极小值。
         """
-        # 确定性初始化隐藏层状态（除了已固定的可见单元）
-        self.invisible_states = np.zeros(self.n_invisible, dtype=int)
+        from collections import Counter
 
-        # 对于未固定的可见单元，也进行确定性初始化
+        # 初始化隐藏层
+        self.invisible_states = (self.rng.random(self.n_invisible) > 0.5).astype(int)
+
+        # 对未固定的可见单元随机初始化
         for i in range(self.n_visible):
             if i not in self.fixed_visible_indices:
-                self.visible_states[i] = 0
+                self.visible_states[i] = int(self.rng.random() > 0.5)
 
-        # 收集推理过程中的状态用于多数投票
         all_states = []
         early_converged = False
         convergence_step = max_steps
 
-        for step in range(max_steps):
-            # 执行一步Gibbs采样
-            self.gibbs_sampling_step(update_visible=True, update_invisible=True)
+        T_start = self.inference_initial_temp
+        T_end = self.inference_final_temp
 
-            # 记录当前状态（每步都记录）
+        for step in range(max_steps):
+            # 温度退火：线性从 T_start 降到 T_end
+            progress = step / max(max_steps - 1, 1)
+            current_temp = T_start + (T_end - T_start) * progress
+
+            self.gibbs_sampling_step(update_visible=True, update_invisible=True, temperature=current_temp)
+
             current_state = tuple(self.visible_states)
             all_states.append(current_state)
 
-            # 定期检查早期收敛（基于最近状态的主导模式）
             if step > voting_window and step % check_interval == 0:
                 recent_states = all_states[-voting_window:]
-
-                # 统计最近状态的出现频率
-                from collections import Counter
                 state_counts = Counter(recent_states)
                 most_common_state, most_common_count = state_counts.most_common(1)[0]
                 dominance_ratio = most_common_count / len(recent_states)
 
                 if verbose and step % (check_interval * 5) == 0:
-                    print(f"Step {step}, Dominance ratio: {dominance_ratio:.3f}, Dominant state: {most_common_state}")
+                    print(f"Step {step}, T={current_temp:.3f}, Dominance: {dominance_ratio:.3f}, State: {most_common_state}")
 
-                # 如果某个状态占主导地位，提前停止
                 if dominance_ratio >= early_stop_threshold:
                     if verbose:
                         print(f"Early convergence at step {step}, dominance: {dominance_ratio:.3f}")
-                    # 设置最终状态为主导状态
                     self.visible_states = np.array(most_common_state, dtype=int)
                     early_converged = True
                     convergence_step = step
                     break
 
-        # 使用多数投票确定最终状态（如果没有早期收敛）
         if not early_converged and len(all_states) >= voting_window:
-            # 使用最后的voting_window个状态进行投票
             voting_states = all_states[-voting_window:]
-            from collections import Counter
             state_counts = Counter(voting_states)
-
-            # 选择出现次数最多的状态作为最终结果
             most_voted_state, vote_count = state_counts.most_common(1)[0]
             self.visible_states = np.array(most_voted_state, dtype=int)
-
             dominance_ratio = vote_count / len(voting_states)
             if verbose:
-                print(f"Final voting result: {most_voted_state}, votes: {vote_count}/{len(voting_states)} ({dominance_ratio:.3f})")
+                print(f"Final voting: {most_voted_state}, votes: {vote_count}/{len(voting_states)} ({dominance_ratio:.3f})")
         else:
             dominance_ratio = 1.0 if early_converged else 0.0
 
@@ -644,34 +545,36 @@ class StandardBoltzmannMachine:
 
     def generate_samples(self, n_samples=10, gibbs_steps=1000, burn_in=100):
         """
-        生成样本
+        从学到的分布中自由生成样本。
+
+        生成前自动清除 fixed_visible_indices，使用训练温度采样，
+        生成后恢复原有的 fixed 状态。
 
         Args:
-            n_samples: 要生成的样本数
-            gibbs_steps: 每个样本的Gibbs采样步数
-            burn_in: 燃尽期步数
+            n_samples: 生成样本数
+            gibbs_steps: 每个样本的 Gibbs 采样步数
+            burn_in: 丢弃的预热步数
 
         Returns:
-            np.ndarray: 生成的样本 (n_samples, n_visible)
+            np.ndarray: shape (n_samples, n_visible)
         """
+        saved_fixed = self.fixed_visible_indices.copy()
+        self.fixed_visible_indices = set()
+
         samples = []
+        for _ in range(n_samples):
+            self.visible_states = self.rng.integers(0, 2, self.n_visible)
+            self.invisible_states = self.rng.integers(0, 2, self.n_invisible)
 
-        for sample_idx in range(n_samples):
-            # 随机初始化（使用固定种子确保可重现性）
-            np.random.seed(RANDOM_SEED + sample_idx)
-            self.visible_states = np.random.randint(0, 2, self.n_visible)
-            self.invisible_states = np.random.randint(0, 2, self.n_invisible)
-
-            # 燃尽期
             for _ in range(burn_in):
-                self.gibbs_sampling_step()
+                self.gibbs_sampling_step(temperature=self.temperature)
 
-            # 采样期
             for _ in range(gibbs_steps):
-                self.gibbs_sampling_step()
+                self.gibbs_sampling_step(temperature=self.temperature)
 
             samples.append(self.visible_states.copy())
 
+        self.fixed_visible_indices = saved_fixed
         return np.array(samples)
 
     def get_network_statistics(self):
@@ -702,6 +605,196 @@ class StandardBoltzmannMachine:
             'learning_rate': self.learning_rate,
             'temperature': self.temperature
         }
+
+
+class RestrictedBoltzmannMachine:
+    """
+    受限玻尔兹曼机 (RBM) 实现
+
+    与 StandardBoltzmannMachine 的关键区别：
+    - 仅有可见-隐藏层间连接，无层内连接（二部图结构）
+    - 给定一层时另一层条件独立 → 可并行采样
+    - CD 训练高效收敛
+
+    纯计算类，不依赖 Manim context。
+    """
+
+    def __init__(self, n_visible, n_hidden, seed=DEFAULT_SEED):
+        self.n_visible = n_visible
+        self.n_hidden = n_hidden
+        self.rng = np.random.default_rng(seed)
+
+        self.W = self.rng.normal(0, 0.01, (n_visible, n_hidden))
+        self.vbias = np.zeros(n_visible)
+        self.hbias = np.zeros(n_hidden)
+
+        self.lr = 0.1
+        self.momentum = 0.5
+        self.weight_cost = 1e-4
+
+        self._dW = np.zeros_like(self.W)
+        self._dvb = np.zeros_like(self.vbias)
+        self._dhb = np.zeros_like(self.hbias)
+
+    @staticmethod
+    def _sigmoid(x):
+        x = np.clip(x, -500, 500)
+        return 1.0 / (1.0 + np.exp(-x))
+
+    def h_given_v(self, v):
+        """P(h_j=1 | v) for all hidden units in parallel."""
+        return self._sigmoid(v @ self.W + self.hbias)
+
+    def v_given_h(self, h):
+        """P(v_i=1 | h) for all visible units in parallel."""
+        return self._sigmoid(h @ self.W.T + self.vbias)
+
+    def sample_h(self, v):
+        """Sample hidden states given visible."""
+        ph = self.h_given_v(v)
+        return (self.rng.random(ph.shape) < ph).astype(np.float64), ph
+
+    def sample_v(self, h):
+        """Sample visible states given hidden."""
+        pv = self.v_given_h(h)
+        return (self.rng.random(pv.shape) < pv).astype(np.float64), pv
+
+    def train(self, data, epochs=500, cd_steps=1, batch_size=None, verbose=False):
+        """
+        CD-k 训练，含 momentum 退火。
+
+        Returns:
+            dict with loss_history, converged, final_epoch, best_loss
+        """
+        data = np.array(data, dtype=np.float64)
+        n = len(data)
+        if batch_size is None:
+            batch_size = n
+
+        loss_history = []
+        best_loss = float('inf')
+        best_W = self.W.copy()
+        best_vb = self.vbias.copy()
+        best_hb = self.hbias.copy()
+        patience = 80
+        no_improve = 0
+
+        for epoch in range(epochs):
+            mom = 0.5 if epoch < 5 else 0.9
+            idx = self.rng.permutation(n)
+            epoch_loss = 0.0
+            n_batches = 0
+
+            for start in range(0, n, batch_size):
+                batch = data[idx[start:start + batch_size]]
+                bs = len(batch)
+
+                # Positive phase: use probabilities for hidden
+                ph_data = self.h_given_v(batch)
+                pos_grad_W = batch.T @ ph_data / bs
+                pos_grad_vb = batch.mean(axis=0)
+                pos_grad_hb = ph_data.mean(axis=0)
+
+                # Negative phase (CD-k): sample hidden, reconstruct visible
+                h_sample = (self.rng.random(ph_data.shape) < ph_data).astype(np.float64)
+                for _ in range(cd_steps):
+                    pv_recon = self.v_given_h(h_sample)
+                    v_recon = (self.rng.random(pv_recon.shape) < pv_recon).astype(np.float64)
+                    ph_recon = self.h_given_v(v_recon)
+                    h_sample = (self.rng.random(ph_recon.shape) < ph_recon).astype(np.float64)
+
+                neg_grad_W = v_recon.T @ ph_recon / bs
+                neg_grad_vb = v_recon.mean(axis=0)
+                neg_grad_hb = ph_recon.mean(axis=0)
+
+                self._dW = mom * self._dW + self.lr * (pos_grad_W - neg_grad_W - self.weight_cost * self.W)
+                self._dvb = mom * self._dvb + self.lr * (pos_grad_vb - neg_grad_vb)
+                self._dhb = mom * self._dhb + self.lr * (pos_grad_hb - neg_grad_hb)
+
+                self.W += self._dW
+                self.vbias += self._dvb
+                self.hbias += self._dhb
+
+                # Reconstruction error using probabilities from first CD step
+                pv_from_data = self.v_given_h(
+                    (self.rng.random(ph_data.shape) < ph_data).astype(np.float64)
+                )
+                epoch_loss += np.mean((batch - pv_from_data) ** 2)
+                n_batches += 1
+
+            avg_loss = epoch_loss / n_batches
+            loss_history.append(avg_loss)
+
+            if avg_loss < best_loss - 1e-6:
+                best_loss = avg_loss
+                best_W = self.W.copy()
+                best_vb = self.vbias.copy()
+                best_hb = self.hbias.copy()
+                no_improve = 0
+            else:
+                no_improve += 1
+
+            if verbose and epoch % 100 == 0:
+                print(f"Epoch {epoch}: loss={avg_loss:.6f}")
+
+            if no_improve >= patience and best_loss < 0.01:
+                self.W = best_W
+                self.vbias = best_vb
+                self.hbias = best_hb
+                return {
+                    'loss_history': loss_history,
+                    'converged': True,
+                    'final_epoch': epoch,
+                    'best_loss': best_loss,
+                }
+
+        self.W = best_W
+        self.vbias = best_vb
+        self.hbias = best_hb
+        return {
+            'loss_history': loss_history,
+            'converged': best_loss < 0.01,
+            'final_epoch': epochs - 1,
+            'best_loss': best_loss,
+        }
+
+    def generate_samples(self, n_samples=10, gibbs_steps=1000, burn_in=200):
+        """Free generation via Gibbs sampling from random initialisation."""
+        samples = []
+        for _ in range(n_samples):
+            v = (self.rng.random(self.n_visible) > 0.5).astype(np.float64)
+            for _ in range(burn_in + gibbs_steps):
+                h, _ = self.sample_h(v)
+                v, _ = self.sample_v(h)
+            samples.append(v.astype(int))
+        return np.array(samples)
+
+    def conditional_sample(self, clamped_vals, clamped_idx, n_samples=100,
+                           gibbs_steps=500, burn_in=100):
+        """
+        Sample visible units with some positions clamped.
+
+        Args:
+            clamped_vals: dict {visible_index: value} for clamped units
+            clamped_idx: list of clamped visible indices (kept for API compat)
+            n_samples: number of samples to collect
+            gibbs_steps: Gibbs steps per sample
+            burn_in: burn-in steps discarded
+        """
+        samples = []
+        for _ in range(n_samples):
+            v = (self.rng.random(self.n_visible) > 0.5).astype(np.float64)
+            for idx in clamped_idx:
+                v[idx] = clamped_vals[idx]
+
+            for step in range(burn_in + gibbs_steps):
+                h, _ = self.sample_h(v)
+                v, _ = self.sample_v(h)
+                for idx in clamped_idx:
+                    v[idx] = clamped_vals[idx]
+
+            samples.append(v.astype(int))
+        return np.array(samples)
 
 
 class StandardHopfieldNetwork:
@@ -882,398 +975,6 @@ class StandardHopfieldNetwork:
                 'max': np.max(self.weights)
             }
         }
-
-
-class HashExtendedHopfield:
-    """
-    哈希扩展Hopfield网络
-
-    对长度为N的存储，拥有3N个神经元：
-    - 前N个：原始数据
-    - 中N个：shift(vec, N/2)的结果
-    - 后N个：reverse的结果
-
-    特点：
-    1. 通过数据扩展增强模式存储能力
-    2. 支持两种推理模式：完全扩展模式和部分锁定模式
-    3. 基于传统Hopfield网络架构
-    """
-
-    def __init__(self, n_original=6):
-        """
-        初始化哈希扩展Hopfield网络
-
-        Args:
-            n_original: 原始数据长度
-        """
-        self.n_original = n_original
-        self.n_total = 3 * n_original  # 总神经元数量：3N
-
-        # 创建底层的标准Hopfield网络
-        self.hopfield_network = StandardHopfieldNetwork(n_neurons=self.n_total)
-
-    def _shift_vector(self, vec, shift_amount):
-        """
-        循环移位向量
-
-        Args:
-            vec: 输入向量
-            shift_amount: 移位量
-
-        Returns:
-            移位后的向量
-        """
-        vec = np.array(vec)
-        return np.roll(vec, shift_amount)
-
-    def _reverse_vector(self, vec):
-        """
-        反转向量
-
-        Args:
-            vec: 输入向量
-
-        Returns:
-            反转后的向量
-        """
-        return np.array(vec)[::-1]
-
-    def _extend_pattern(self, pattern):
-        """
-        将N长度的模式扩展为3N长度
-
-        Args:
-            pattern: 原始模式 (长度N)
-
-        Returns:
-            扩展后的模式 (长度3N)
-        """
-        pattern = np.array(pattern)
-
-        # 原始部分
-        original_part = pattern
-
-        # 移位部分 (shift N/2)
-        shift_amount = self.n_original // 2
-        shifted_part = self._shift_vector(pattern, shift_amount)
-
-        # 反转部分
-        reversed_part = self._reverse_vector(pattern)
-
-        # 合并为3N长度的向量
-        extended_pattern = np.concatenate([original_part, shifted_part, reversed_part])
-
-        return extended_pattern.tolist()
-
-    def train(self, patterns):
-        """
-        训练网络
-
-        Args:
-            patterns: 训练模式列表，每个模式长度为N
-        """
-        # 扩展所有训练模式
-        extended_patterns = []
-        for pattern in patterns:
-            extended_pattern = self._extend_pattern(pattern)
-            extended_patterns.append(extended_pattern)
-
-        # 使用扩展后的模式训练底层Hopfield网络
-        self.hopfield_network.train(extended_patterns)
-
-    def recall_mode_a(self, cue_pattern, max_iterations=50, verbose=False):
-        """
-        推理模式A：对带掩码数据进行相同扩展，然后输入并锁定对应的神经元
-
-        Args:
-            cue_pattern: 线索模式，None表示未设置的位置 (长度N)
-            max_iterations: 最大迭代次数
-            verbose: 是否打印详细信息
-
-        Returns:
-            dict: 包含推理结果的字典
-        """
-        # 扩展线索模式
-        extended_cue = self._extend_cue_pattern(cue_pattern)
-
-        # 使用扩展后的线索进行推理
-        result = self.hopfield_network.recall(extended_cue, max_iterations, verbose)
-
-        # 提取前N个神经元作为最终结果
-        if 'final_state' in result:
-            result['final_state'] = result['final_state'][:self.n_original]
-
-        return result
-
-    def recall_mode_b(self, cue_pattern, max_iterations=50, verbose=False):
-        """
-        推理模式B：不进行扩展，仅将带掩码的数据输入并锁定[:N]的对应神经元
-
-        Args:
-            cue_pattern: 线索模式，None表示未设置的位置 (长度N)
-            max_iterations: 最大迭代次数
-            verbose: 是否打印详细信息
-
-        Returns:
-            dict: 包含推理结果的字典
-        """
-        # 创建3N长度的线索模式，只设置前N个位置
-        extended_cue = [None] * self.n_total
-        for i, value in enumerate(cue_pattern):
-            if i < self.n_original:
-                extended_cue[i] = value
-
-        # 使用扩展后的线索进行推理
-        result = self.hopfield_network.recall(extended_cue, max_iterations, verbose)
-
-        # 提取前N个神经元作为最终结果
-        if 'final_state' in result:
-            result['final_state'] = result['final_state'][:self.n_original]
-
-        return result
-
-    def _extend_cue_pattern(self, cue_pattern):
-        """
-        扩展线索模式（用于模式A）
-
-        Args:
-            cue_pattern: 原始线索模式 (长度N，None表示未设置)
-
-        Returns:
-            扩展后的线索模式 (长度3N)
-        """
-        # 创建临时的完整模式用于扩展计算
-        temp_pattern = []
-        known_indices = []
-        known_values = []
-
-        for i, value in enumerate(cue_pattern):
-            if value is not None:
-                temp_pattern.append(value)
-                known_indices.append(i)
-                known_values.append(value)
-            else:
-                temp_pattern.append(0)  # 临时填充0
-
-        # 扩展临时模式
-        extended_temp = self._extend_pattern(temp_pattern)
-
-        # 创建最终的线索模式，只保留已知位置
-        extended_cue = [None] * self.n_total
-
-        # 设置原始部分的已知值
-        for i, value in enumerate(cue_pattern):
-            if value is not None:
-                extended_cue[i] = value
-
-        # 计算并设置移位部分的已知值
-        shift_amount = self.n_original // 2
-        for orig_idx in known_indices:
-            shifted_idx = (orig_idx + shift_amount) % self.n_original
-            extended_cue[self.n_original + shifted_idx] = known_values[known_indices.index(orig_idx)]
-
-        # 计算并设置反转部分的已知值
-        for orig_idx in known_indices:
-            reversed_idx = self.n_original - 1 - orig_idx
-            extended_cue[2 * self.n_original + reversed_idx] = known_values[known_indices.index(orig_idx)]
-
-        return extended_cue
-
-    def get_network_statistics(self):
-        """
-        获取网络统计信息
-
-        Returns:
-            dict: 网络统计信息
-        """
-        stats = self.hopfield_network.get_network_statistics()
-        stats.update({
-            'n_original': self.n_original,
-            'n_total': self.n_total,
-            'extension_ratio': self.n_total / self.n_original
-        })
-        return stats
-
-
-class HashExtendedHopfieldVisualizer:
-    """
-    哈希扩展Hopfield网络可视化器
-
-    专门用于可视化HashExtendedHopfield网络的结构和推理过程
-    """
-
-    def __init__(self, context, hash_hopfield, face_size=0.4, section_spacing=2.0):
-        """
-        初始化可视化器
-
-        Args:
-            context: Manim场景上下文
-            hash_hopfield: HashExtendedHopfield实例
-            face_size: 脸的尺寸
-            section_spacing: 各部分之间的间距
-        """
-        self.context = context
-        self.hash_hopfield = hash_hopfield
-        self.face_size = face_size
-        self.section_spacing = section_spacing
-
-        # 可视化元素
-        self.original_faces = []
-        self.shifted_faces = []
-        self.reversed_faces = []
-
-        self.original_positions = []
-        self.shifted_positions = []
-        self.reversed_positions = []
-
-        self.section_labels = []
-        self.connection_lines = []
-
-    def create_extended_network_layout(self, center_pos=[0, 0, 0], show_animation=True):
-        """
-        创建扩展网络的布局显示
-
-        Args:
-            center_pos: 网络中心位置
-            show_animation: 是否显示动画
-        """
-        n = self.hash_hopfield.n_original
-
-        # 计算三个部分的位置
-        original_center = [center_pos[0] - self.section_spacing, center_pos[1], center_pos[2]]
-        shifted_center = [center_pos[0], center_pos[1], center_pos[2]]
-        reversed_center = [center_pos[0] + self.section_spacing, center_pos[1], center_pos[2]]
-
-        # 创建三个部分的标签
-        original_label = Text("原始 (N)", font_size=16, color="#FFD700")
-        original_label.move_to([original_center[0], original_center[1] + 1.5, original_center[2]])
-
-        shifted_label = Text(f"移位 (N/2={n//2})", font_size=16, color="#90EE90")
-        shifted_label.move_to([shifted_center[0], shifted_center[1] + 1.5, shifted_center[2]])
-
-        reversed_label = Text("反转", font_size=16, color="#FF6B9D")
-        reversed_label.move_to([reversed_center[0], reversed_center[1] + 1.5, reversed_center[2]])
-
-        self.section_labels = [original_label, shifted_label, reversed_label]
-
-        if show_animation:
-            self.context.play(*[Write(label) for label in self.section_labels], run_time=0.5)
-        else:
-            self.context.add(*self.section_labels)
-
-        # 创建三个部分的神经元
-        self._create_section_neurons(original_center, self.original_faces, self.original_positions,
-                                   BLUE, "原始", show_animation)
-        self._create_section_neurons(shifted_center, self.shifted_faces, self.shifted_positions,
-                                   GREEN, "移位", show_animation)
-        self._create_section_neurons(reversed_center, self.reversed_faces, self.reversed_positions,
-                                   PURPLE, "反转", show_animation)
-
-    def _create_section_neurons(self, center_pos, faces_list, positions_list, color, section_name, show_animation):
-        """创建一个部分的神经元"""
-        n = self.hash_hopfield.n_original
-
-        # 计算神经元位置（垂直排列）
-        for i in range(n):
-            y_offset = (i - (n-1)/2) * 0.6
-            position = [center_pos[0], center_pos[1] + y_offset, center_pos[2]]
-            positions_list.append(position)
-
-            # 创建神经元（使用圆点表示）
-            neuron = Dot(radius=0.08, color=color, fill_opacity=0.8)
-            neuron.move_to(position)
-            faces_list.append(neuron)
-
-            # 添加索引标签
-            index_label = Text(str(i), font_size=10, color=WHITE)
-            index_label.move_to([position[0] + 0.3, position[1], position[2]])
-
-            if show_animation:
-                self.context.play(FadeIn(neuron), Write(index_label), run_time=0.1)
-            else:
-                self.context.add(neuron, index_label)
-
-    def visualize_pattern_extension(self, pattern, show_animation=True):
-        """
-        可视化模式扩展过程
-
-        Args:
-            pattern: 原始模式 (长度N)
-            show_animation: 是否显示动画
-        """
-        # 更新原始部分
-        self._update_section_display(pattern, self.original_faces, BLUE, RED, show_animation)
-
-        # 计算并显示移位部分
-        shift_amount = self.hash_hopfield.n_original // 2
-        shifted_pattern = self.hash_hopfield._shift_vector(pattern, shift_amount)
-        self._update_section_display(shifted_pattern, self.shifted_faces, GREEN, ORANGE, show_animation)
-
-        # 计算并显示反转部分
-        reversed_pattern = self.hash_hopfield._reverse_vector(pattern)
-        self._update_section_display(reversed_pattern, self.reversed_faces, PURPLE, PINK, show_animation)
-
-    def _update_section_display(self, pattern, faces_list, color_1, color_0, show_animation):
-        """更新一个部分的显示"""
-        animations = []
-
-        for i, value in enumerate(pattern):
-            if i < len(faces_list):
-                color = color_1 if value == 1 else color_0
-
-                if show_animation:
-                    animations.append(faces_list[i].animate.set_color(color))
-                else:
-                    faces_list[i].set_color(color)
-
-        if show_animation and animations:
-            self.context.play(*animations, run_time=0.5)
-
-    def visualize_recall_process(self, cue_pattern, mode='A', show_animation=True):
-        """
-        可视化回忆过程
-
-        Args:
-            cue_pattern: 线索模式
-            mode: 推理模式 ('A' 或 'B')
-            show_animation: 是否显示动画
-
-        Returns:
-            推理结果
-        """
-        # 根据模式进行推理
-        if mode == 'A':
-            result = self.hash_hopfield.recall_mode_a(cue_pattern, verbose=False)
-        else:
-            result = self.hash_hopfield.recall_mode_b(cue_pattern, verbose=False)
-
-        # 可视化最终结果
-        if 'final_state' in result:
-            final_pattern = result['final_state']
-            self.visualize_pattern_extension(final_pattern, show_animation)
-
-        return result
-
-    def create_card(self, value):
-        """创建牌组卡片"""
-        if value == 1:
-            return Dot(radius=0.08, color=BLUE, fill_opacity=0.8)
-        else:
-            return Dot(radius=0.08, color=RED, fill_opacity=0.8)
-
-    def reset_to_neutral(self, show_animation=True):
-        """重置所有神经元为中性状态"""
-        all_faces = self.original_faces + self.shifted_faces + self.reversed_faces
-        animations = []
-
-        for face in all_faces:
-            if show_animation:
-                animations.append(face.animate.set_color(GRAY))
-            else:
-                face.set_color(GRAY)
-
-        if show_animation and animations:
-            self.context.play(*animations, run_time=0.5)
 
 
 class BoltzmannMachineVisualizer:
